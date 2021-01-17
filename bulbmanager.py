@@ -1,7 +1,7 @@
 import bluetooth, threading, logging
-#import time
+from bulb import BluetoothBulb
 
-class BluetoothBulbDiscoverer:
+class BluetoothBulbManager:
     def __init__(self):
         self.__devices = { }
         self.__discover_running = False
@@ -26,12 +26,11 @@ class BluetoothBulbDiscoverer:
             self.__discover_running = False
             self.__discover_thread.join()
             
-            to_delete = list()
-            for addr, name in self.__devices.items():
-                to_delete.append(addr)
-                self.__discover_callback(False, addr, name)
-            for addr in to_delete:
-                del self.__devices[addr]
+        for addr, bulb in self.__devices.items():
+            bulb.disconnect()
+            self.__discover_callback(False, bulb)
+
+        self.__devices.clear()
     
     
     def __discover_devices(self):
@@ -44,14 +43,17 @@ class BluetoothBulbDiscoverer:
 
                 for addr, name in devices:
                     if addr not in self.__devices and addr[0:4] in ('C9:7', 'C9:8', 'C9:A'):
-                        self.__devices[addr] = name
-                        self.__discover_callback(True, addr, name)
+                        bulb = BluetoothBulb(addr, name)
+                        bulb.connect()
+                        self.__discover_callback(True, bulb)
+                        self.__devices[addr] = bulb
 
                 to_delete = list()
-                for addr, name in self.__devices.items():
-                    if (addr, name) not in devices:
+                for addr, bulb in self.__devices.items():
+                    if (addr, bulb.get_name()) not in devices and not bulb.is_connected():
                         to_delete.append(addr)
-                        self.__discover_callback(False, addr, name)
+                        bulb.disconnect()
+                        self.__discover_callback(False, bulb)
                 for addr in to_delete:
                     del self.__devices[addr]
             except:
@@ -62,4 +64,9 @@ class BluetoothBulbDiscoverer:
             #time.sleep(60)
 
         logging.debug('Discoverer stopped')
+    
+    
+    def get_bluetooth_bulb(self, addr):
+        return self.__devices[addr]
+
 

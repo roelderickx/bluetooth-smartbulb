@@ -1,7 +1,9 @@
 import bluetooth, math, time, threading, logging
 
 class BluetoothBulb:
-    def __init__(self):
+    def __init__(self, mac_address, name):
+        self.__mac_address = mac_address
+        self.__name = name
         self.__sock = None
         self.__socket_lock = threading.Lock()
         self.__heartbeat_running = False
@@ -10,8 +12,20 @@ class BluetoothBulb:
         self.__is_color = None
         self.__current_brightness = None
         self.__current_color = None
+    
+    
+    def is_connected(self):
+        return (self.__sock is not None)
 
 
+    def get_name(self):
+        return self.__name
+
+
+    def get_mac_address(self):
+        return self.__mac_address
+    
+    
     def is_powered_on(self):
         return self.__is_power
     
@@ -77,29 +91,33 @@ class BluetoothBulb:
 
     def __send_hex_string(self, bulb_function, data):
         with self.__socket_lock:
-            logging.debug('Sending function %02x - data %s' % (bulb_function, data))
-            hex_string = '01fe000051%02x' % bulb_function # 01fe0000 + 51 (write) + function code
-            length = int(len(data) / 2) + 7
-            hex_string = '%s%02x%s' % (hex_string, length, data)
-            self.__sock.send(bluetooth.binascii.unhexlify(hex_string))
-            
-            logging.debug('Receiving answer')
-            header = self.__sock.recv(6) # 01fe0000 + 41 (read) + function code
-            logging.debug('  header = %s' % bluetooth.binascii.hexlify(header))
-            length = self.__sock.recv(1) # length
-            logging.debug('  length = %d' % length[0])
-            data = self.__sock.recv(length[0] - 7) # data
-            logging.debug('  data = %s' % bluetooth.binascii.hexlify(data))
+            try:
+                logging.debug('Sending function %02x - data %s' % (bulb_function, data))
+                hex_string = '01fe000051%02x' % bulb_function # 01fe0000 + 51 (write) + function code
+                length = int(len(data) / 2) + 7
+                hex_string = '%s%02x%s' % (hex_string, length, data)
+                self.__sock.send(bluetooth.binascii.unhexlify(hex_string))
+                
+                logging.debug('Receiving answer')
+                header = self.__sock.recv(6) # 01fe0000 + 41 (read) + function code
+                logging.debug('  header = %s' % bluetooth.binascii.hexlify(header))
+                length = self.__sock.recv(1) # length
+                logging.debug('  length = %d' % length[0])
+                data = self.__sock.recv(length[0] - 7) # data
+                logging.debug('  data = %s' % bluetooth.binascii.hexlify(data))
+            except:
+                self.__sock.close()
+                self.__sock = None
 
         return data
 
 
     # Connects to the bulb at the given MAC address. Note that the bluetooth controller should be
     # powered on and no other device should have a connection to the bulb.
-    def connect(self, mac_address):
+    def connect(self):
         # search for SPP service
         service_matches = bluetooth.find_service(uuid='00001101-0000-1000-8000-00805F9B34FB', \
-                                                 address=mac_address)
+                                                 address=self.__mac_address)
 
         if len(service_matches) > 0:
             #if len(service_matches) > 1:
@@ -112,10 +130,14 @@ class BluetoothBulb:
 
             # Create the client socket
             logging.info('Connecting to \'%s\' on %s port %s' % (name, host, port))
-            self.__sock = bluetooth.BluetoothSocket(bluetooth.RFCOMM)
-            self.__sock.connect((host, port))
-            
-            self.__setup_connection()
+            try:
+                self.__sock = bluetooth.BluetoothSocket(bluetooth.RFCOMM)
+                self.__sock.connect((host, port))
+                
+                self.__setup_connection()
+            except:
+                logging.error('Connection to %s failed' % self.__mac_address)
+                self.__sock = None
         else:
             logging.error('Couldn\'t find the SPP service.')
 
