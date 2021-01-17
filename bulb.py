@@ -92,8 +92,8 @@ class BluetoothBulb:
             logging.debug('  data = %s' % bluetooth.binascii.hexlify(data))
 
         return data
-    
-    
+
+
     # Connects to the bulb at the given MAC address. Note that the bluetooth controller should be
     # powered on and no other device should have a connection to the bulb.
     def connect(self, mac_address):
@@ -169,13 +169,14 @@ class BluetoothBulb:
             logging.debug('Heartbeat')
             self.__send_hex_string(0x02, '000000008000000080')
             time.sleep(1)
-        logging.debug('Stopping heartbeat')
+        logging.debug('Heartbeat stopped')
     
     
     def __start_heartbeat_thread(self):
         logging.debug('Starting heartbeat')
-        self.__heartbeat_thread = threading.Thread(target=self.__heartbeat, args=())
-        self.__heartbeat_thread.start()
+        if not self.__heartbeat_running:
+            self.__heartbeat_thread = threading.Thread(target=self.__heartbeat, args=())
+            self.__heartbeat_thread.start()
     
     
     def __stop_heartbeat_thread(self):
