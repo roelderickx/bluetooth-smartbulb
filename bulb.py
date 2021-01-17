@@ -1,8 +1,11 @@
-import bluetooth, math, logging
+import bluetooth, math, time, threading, logging
 
 class BluetoothBulb:
     def __init__(self):
         self.__sock = None
+        self.__socket_lock = threading.Lock()
+        self.__heartbeat_running = False
+        self.__heartbeat_thread = None
         self.__is_power = None
         self.__is_color = None
         self.__current_brightness = None
@@ -17,11 +20,7 @@ class BluetoothBulb:
         return self.__is_color
     
     
-    def get_brightness_range(self):
-        return (255 if self.__is_color else 16)
-    
-    
-    # returns current lamp brightness. range is ]0, get_brightness_range()]
+    # returns current lamp brightness. range is [1, 16]
     def get_brightness(self):
         return self.__current_brightness
 
@@ -63,30 +62,35 @@ class BluetoothBulb:
     
     # calculates __current_brightness from (r, g, b) color
     # and sets __current_color to (r, g, b) at maximum intensity
-    def __normalize_color_brightness(self, r, g, b):
-        self.__current_brightness = max(r, g, b)
-        r_ = int(r * 255 / self.__current_brightness)
-        g_ = int(g * 255 / self.__current_brightness)
-        b_ = int(b * 255 / self.__current_brightness)
-        self.__current_color = (r_, g_, b_)
+    def __set_normalized_color_brightness(self, r, g, b):
+        brightness = max(r, g, b, 1)
+        if brightness == 255:
+            self.__current_brightness = 16
+            self.__current_color = (r, g, b)
+        else:
+            self.__current_brightness = math.ceil(brightness / 16)
+            self.__current_color = \
+                (math.ceil(round(r * 255 / brightness, 0)), \
+                 math.ceil(round(g * 255 / brightness, 0)), \
+                 math.ceil(round(b * 255 / brightness, 0)))
     
 
     def __send_hex_string(self, bulb_function, data):
-        logging.debug('Sending function %02x - data %s' % (bulb_function, data))
-        hex_string = '01fe000051%02x' % bulb_function # 01fe0000 + 51 (write) + function code
-        length = int(len(data) / 2) + 7
-        hex_string = '%s%02x%s' % (hex_string, length, data)
-        self.__sock.send(bluetooth.binascii.unhexlify(hex_string))
+        with self.__socket_lock:
+            logging.debug('Sending function %02x - data %s' % (bulb_function, data))
+            hex_string = '01fe000051%02x' % bulb_function # 01fe0000 + 51 (write) + function code
+            length = int(len(data) / 2) + 7
+            hex_string = '%s%02x%s' % (hex_string, length, data)
+            self.__sock.send(bluetooth.binascii.unhexlify(hex_string))
+            
+            logging.debug('Receiving answer')
+            header = self.__sock.recv(6) # 01fe0000 + 41 (read) + function code
+            logging.debug('  header = %s' % bluetooth.binascii.hexlify(header))
+            length = self.__sock.recv(1) # length
+            logging.debug('  length = %d' % length[0])
+            data = self.__sock.recv(length[0] - 7) # data
+            logging.debug('  data = %s' % bluetooth.binascii.hexlify(data))
 
-
-    def __recv_hex_string(self):
-        logging.debug('Receiving answer')
-        header = self.__sock.recv(6) # 01fe0000 + 41 (read) + function code
-        logging.debug('  header = %s' % bluetooth.binascii.hexlify(header))
-        length = self.__sock.recv(1) # length
-        logging.debug('  length = %d' % length[0])
-        data = self.__sock.recv(length[0] - 7) # data
-        logging.debug('  data = %s' % bluetooth.binascii.hexlify(data))
         return data
     
     
@@ -120,6 +124,7 @@ class BluetoothBulb:
     def disconnect(self):
         if self.__sock:
             logging.info('Disconnecting')
+            self.__stop_heartbeat_thread()
             self.__sock.close()
             self.__sock = None
             self.__is_power = None
@@ -142,7 +147,7 @@ class BluetoothBulb:
         logging.debug('Setup connection')
         # ASCII 01234567
         self.__sock.send(bluetooth.binascii.unhexlify('3031323334353637'))
-        self.__heartbeat()
+        self.__start_heartbeat_thread()
         # read current color
         self.__read_current_status()
         # we don't know the pwer state, turn it on to be sure
@@ -152,17 +157,32 @@ class BluetoothBulb:
     # bulb function 0x00, TODO information is returned but its meaning is unclear
     @__check_connection
     def read_information_0x00(self):
-        self.__send_hex_string(0x00, '000000008000000080')
-        return self.__recv_hex_string()
+        return self.__send_hex_string(0x00, '000000008000000080')
 
 
     # bulb function 0x02, heartbeat TODO information is returned but its meaning is unclear
     # The official app sends this about once a second, but it turns out to be not strictly necessary
-    @__check_connection
+    #@__check_connection
     def __heartbeat(self):
-        logging.debug('Heartbeat')
-        self.__send_hex_string(0x02, '000000008000000080')
-        self.__recv_hex_string()
+        self.__heartbeat_running = True
+        while self.__heartbeat_running:
+            logging.debug('Heartbeat')
+            self.__send_hex_string(0x02, '000000008000000080')
+            time.sleep(1)
+        logging.debug('Stopping heartbeat')
+    
+    
+    def __start_heartbeat_thread(self):
+        logging.debug('Starting heartbeat')
+        self.__heartbeat_thread = threading.Thread(target=self.__heartbeat, args=())
+        self.__heartbeat_thread.start()
+    
+    
+    def __stop_heartbeat_thread(self):
+        logging.debug('Stopping heartbeat')
+        if self.__heartbeat_thread and self.__heartbeat_running:
+            self.__heartbeat_running = False
+            self.__heartbeat_thread.join()
     
     
     # bulb function 0x80, read bulb identification
@@ -171,26 +191,23 @@ class BluetoothBulb:
     @__check_connection
     def read_identification(self):
         logging.debug('Read lamp information')
-        self.__send_hex_string(0x80, '000000000000000000')
-        return self.__recv_hex_string()
+        return self.__send_hex_string(0x80, '000000000000000000')
 
 
     # bulb function 0x81, subfunction 0x00: read power and color status
     @__check_connection
     def __read_current_status(self):
-        self.__send_hex_string(0x81, '0000000000000000000d07010300000e')
-        data = self.__recv_hex_string()
+        data = self.__send_hex_string(0x81, '0000000000000000000d07010300000e')
         logging.debug('Read color mode status: %s' % bluetooth.binascii.hexlify(data))
         if data[14] == 0x01:
             self.__is_color = False
             self.__current_brightness = data[15] # range 0-16
             self.__current_color = (0xff, 0xff, 0xff)
         elif data[14] == 0x02:
-            self.__send_hex_string(0x81, '0000000000000000000d07020300000e')
-            data = self.__recv_hex_string()
+            data = self.__send_hex_string(0x81, '0000000000000000000d07020300000e')
             logging.debug('Read color status: %s' % bluetooth.binascii.hexlify(data))
             self.__is_color = True
-            self.__normalize_color_brightness(data[16], data[17], data[18])
+            self.__set_normalized_color_brightness(data[16], data[17], data[18])
         
         logging.info('Mode is %s' % ('color' if self.__is_color else 'yellow/white'))
         logging.info('Brightness is %d' % self.__current_brightness)
@@ -205,8 +222,6 @@ class BluetoothBulb:
             self.__send_hex_string(0x81, '0000000000000000000d07%s0301%s0e' % \
                                    ('02' if self.__is_color else '01', \
                                     '01' if is_power else '02'))
-            self.__recv_hex_string()
-            self.__heartbeat()
             self.__is_power = is_power
     
     
@@ -218,8 +233,6 @@ class BluetoothBulb:
             self.__send_hex_string(0x81, '0000000000000000000d07%s0301%s0e' % \
                                    ('02' if is_color else '01', \
                                     '01' if self.__is_power else '02'))
-            self.__recv_hex_string()
-            self.__heartbeat()
             self.__is_color = is_color
 
 
@@ -229,17 +242,13 @@ class BluetoothBulb:
         logging.debug('Set brightness to %s' % brightness)
         if not self.__is_color:
             self.__send_hex_string(0x81, '0000000000000000000d07010302%02x0e' % brightness)
-            self.__recv_hex_string()
-            self.__heartbeat()
             self.__current_brightness = brightness
         else:
             (r, g, b) = self.__current_color
-            r_ = int(r * brightness / 255)
-            g_ = int(g * brightness / 255)
-            b_ = int(b * brightness / 255)
+            r_ = int(round(r * brightness / 16, 0))
+            g_ = int(round(g * brightness / 16, 0))
+            b_ = int(round(b * brightness / 16, 0))
             self.set_color_rgb(r_, g_, b_)
-            self.__current_brightness = brightness
-            self.__current_color = (r, g, b)
     
     
     # bulb function 0x81, subfunction 0x03: set color
@@ -248,11 +257,9 @@ class BluetoothBulb:
         logging.debug('Set color to %02x%02x%02x' % (r, g, b))
         
         self.__send_hex_string(0x81, '0000000000000000000d0a020303%02x%02x%02x000e' % (r, g, b))
-        self.__recv_hex_string()
-        self.__heartbeat()
         
         self.__is_color = True
-        self.__normalize_color_brightness(r, g, b)
+        self.__set_normalized_color_brightness(r, g, b)
 
 
     # see https://en.wikipedia.org/wiki/HSL_and_HSV
@@ -275,28 +282,26 @@ class BluetoothBulb:
         elif 300 <= hue < 360:
             (r_, g_, b_) = (c, 0, x)
         
-        (r, g, b) = (int((r_+m)*255), int((g_+m)*255), int((b_+m)*255))
+        (r, g, b) = \
+            (int(round((r_+m)*255, 0)), \
+             int(round((g_+m)*255, 0)), \
+             int(round((b_+m)*255, 0)))
         
         return (r, g, b)
         
     
-    # 0 <= hue < 360, sat = 100, 0 < brightness <= 255
+    # 0 <= hue < 360, sat = 100, 1 <= brightness <= 16
     @__check_connection
     def set_color_hsv(self, hue, brightness):
         sat = 1.0 # saturation values below 0.7 are pointless, will always result in white
-        val = brightness/255
-        (r, g, b) = self.__hsv_to_rgb(hue, 1.0, 1.0)
-        r_ = int(r * brightness / 255)
-        g_ = int(g * brightness / 255)
-        b_ = int(b * brightness / 255)
-        self.set_color_rgb(r_, g_, b_)
-        self.__current_brightness = brightness
-        self.__current_color = (r, g, b)
+        val = brightness/16
+        (r, g, b) = self.__hsv_to_rgb(hue, 1.0, val)
+        self.set_color_rgb(r, g, b)
 
 
     # see https://tannerhelland.com/2012/09/18/convert-temperature-rgb-algorithm-code.html
     # teperature range is [1000, 40000], but the intersting red to white range is [1500, 6600]
-    def __temp_to_rgb(self, temperature):
+    def __temp_to_rgb(self, temperature, brightness):
         t = min(40000, max(1000, temperature)) / 100 # constrain to [1000, 40000] and divide by 100
         # red
         r = 255
@@ -321,19 +326,19 @@ class BluetoothBulb:
             b = 138.5177312231 * math.log(b) - 305.0447927307
             b = min(255, max(0, b)) # constrain to [0, 255]
         
-        return (int(r), int(g), int(b))
+        (r_, g_, b_) = \
+            (int(round(r * brightness / 16, 0)),
+             int(round(g * brightness / 16, 0)),
+             int(round(b * brightness / 16, 0)))
+        
+        return (r_, g_, b_)
     
     
-    # 1000 <= temp_kelvin <= 40000, 0 < brightness <= 255
+    # 1000 <= temp_kelvin <= 40000, 1 <= brightness <= 16
     @__check_connection
     def set_white_temperature(self, temp_kelvin, brightness):
-        (r, g, b) = self.__temp_to_rgb(temp_kelvin)
-        r_ = int(r * brightness / 255)
-        g_ = int(g * brightness / 255)
-        b_ = int(b * brightness / 255)
-        self.set_color_rgb(r_, g_, b_)
-        self.__current_brightness = brightness
-        self.__current_color = (r, g, b)
+        (r, g, b) = self.__temp_to_rgb(temp_kelvin, brightness)
+        self.set_color_rgb(r, g, b)
     
 
     # TODO investigate modes 1, 2 and 3
@@ -349,8 +354,5 @@ class BluetoothBulb:
     def set_party_mode(self, mode):
         logging.debug('Set party mode %s' % mode)
         self.__send_hex_string(0x81, '0000000000000000000d07020304%02x0e' % mode)
-        self.__recv_hex_string()
-        self.__heartbeat()
-        
         self.__is_color = True
 

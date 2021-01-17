@@ -29,16 +29,10 @@ try:
         elif c == 'c':
             b.set_color_mode(True)
         elif c == '-':
-            step = 1
-            if b.is_color_mode():
-                step = 16
-            new_brightness = max(1, b.get_brightness() - step)
+            new_brightness = max(1, b.get_brightness() - 1)
             b.set_brightness(new_brightness)
         elif c == '+':
-            step = 1
-            if b.is_color_mode():
-                step = 16
-            new_brightness = min(b.get_brightness_range(), b.get_brightness() + step)
+            new_brightness = min(16, b.get_brightness() + 1)
             b.set_brightness(new_brightness)
         elif c == '[':
             (hue, sat, val) = b.get_color_hsv()
