@@ -7,9 +7,9 @@ if len(sys.argv) < 2:
 
 logging.basicConfig(level=getattr(logging, 'INFO', None))
 
-b = BluetoothBulb()
+b = BluetoothBulb(sys.argv[1], 'test')
 try:
-    b.connect(sys.argv[1])
+    b.connect()
     
     print('Usage:')
     print('p    Toggle power')
